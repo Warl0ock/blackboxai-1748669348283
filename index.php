@@ -29,7 +29,13 @@ try {
         <!-- Header -->
         <header class="bg-white shadow">
             <div class="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
-                <h1 class="text-3xl font-bold text-gray-900">Dashboard</h1>
+                <div class="flex justify-between items-center">
+                    <h1 class="text-3xl font-bold text-gray-900">Dashboard</h1>
+                    <a href="download.php" class="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 flex items-center">
+                        <i class="fas fa-download mr-2"></i>
+                        Download Project
+                    </a>
+                </div>
             </div>
         </header>
 
