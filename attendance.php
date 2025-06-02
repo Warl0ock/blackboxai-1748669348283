@@ -30,6 +30,67 @@ function getEmployeeShift($pdo, $employee_id, $date) {
     return $stmt->fetch(PDO::FETCH_ASSOC);
 }
 
+// Function to check late attendance and calculate penalties
+function calculateLateAttendance($pdo, $time_in, $shift_start) {
+    // Get late penalty configuration
+    $stmt = $pdo->query("SELECT * FROM late_penalties_config LIMIT 1");
+    $config = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    $time_in_timestamp = strtotime($time_in);
+    $shift_start_timestamp = strtotime($shift_start);
+    
+    // Calculate minutes late
+    $minutes_late = max(0, round(($time_in_timestamp - $shift_start_timestamp) / 60));
+    
+    // If within grace period, consider as on time
+    if ($minutes_late <= $config['grace_period_minutes']) {
+        return ['late_minutes' => 0, 'penalty' => 0, 'status' => 'present'];
+    }
+    
+    // If late more than max hours, consider as absent
+    if ($minutes_late > ($config['max_late_hours'] * 60)) {
+        return ['late_minutes' => $minutes_late, 'penalty' => 0, 'status' => 'absent'];
+    }
+    
+    // Calculate penalty
+    return [
+        'late_minutes' => $minutes_late,
+        'penalty' => $config['penalty_amount'],
+        'status' => 'late'
+    ];
+}
+
+// Function to handle absence
+function handleAbsence($pdo, $employee_id, $attendance_id, $date) {
+    // Check if employee has leave quota
+    $stmt = $pdo->prepare("SELECT leave_quota, daily_salary FROM employees WHERE id = ?");
+    $stmt->execute([$employee_id]);
+    $employee = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    if ($employee['leave_quota'] > 0) {
+        // Deduct from leave quota
+        $pdo->prepare("UPDATE employees SET leave_quota = leave_quota - 1 WHERE id = ?")->execute([$employee_id]);
+        $pdo->prepare("UPDATE attendance_records SET leave_deducted = TRUE WHERE id = ?")->execute([$attendance_id]);
+        
+        // Record leave usage
+        $stmt = $pdo->prepare("
+            INSERT INTO leave_records (employee_id, date, attendance_record_id, leave_type)
+            VALUES (?, ?, ?, 'annual')
+        ");
+        $stmt->execute([$employee_id, $date, $attendance_id]);
+    } else {
+        // Deduct from salary
+        $pdo->prepare("UPDATE attendance_records SET salary_deducted = TRUE WHERE id = ?")->execute([$attendance_id]);
+        
+        // Record salary deduction
+        $stmt = $pdo->prepare("
+            INSERT INTO leave_records (employee_id, date, attendance_record_id, leave_type)
+            VALUES (?, ?, ?, 'salary_deduction')
+        ");
+        $stmt->execute([$employee_id, $date, $attendance_id]);
+    }
+}
+
 // Function to calculate overtime hours
 function calculateOvertime($employee, $time_in, $time_out, $shift_schedule, $is_holiday) {
     if ($employee['status'] == 'non') return 0;
@@ -70,13 +131,38 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         $shift_schedule = getEmployeeShift($pdo, $employee_id, $current_date);
 
         if ($action == 'in') {
+            // Get shift start time
+            $shift_start = date('Y-m-d ') . $shift_schedule['start_time'];
+            
+            // Calculate late attendance
+            $late_info = calculateLateAttendance($pdo, $current_datetime, $shift_start);
+            
             // Record attendance in
             $stmt = $pdo->prepare("
-                INSERT INTO attendance_records (employee_id, date, time_in, is_holiday, shift_schedule_id)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO attendance_records 
+                (employee_id, date, time_in, is_holiday, shift_schedule_id, late_minutes, late_penalty, attendance_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ");
-            $stmt->execute([$employee_id, $current_date, $current_datetime, $is_holiday, $shift_schedule['id'] ?? null]);
-            $message = "Absen masuk berhasil dicatat.";
+            $stmt->execute([
+                $employee_id, 
+                $current_date, 
+                $current_datetime, 
+                $is_holiday, 
+                $shift_schedule['id'] ?? null,
+                $late_info['late_minutes'],
+                $late_info['penalty'],
+                $late_info['status']
+            ]);
+
+            // If marked as absent due to excessive lateness, handle absence
+            if ($late_info['status'] == 'absent') {
+                handleAbsence($pdo, $employee_id, $pdo->lastInsertId(), $current_date);
+                $message = "Terlambat lebih dari batas maksimal. Dianggap tidak hadir.";
+            } else {
+                $message = $late_info['late_minutes'] > 0 
+                    ? "Absen masuk berhasil dicatat. Terlambat " . $late_info['late_minutes'] . " menit."
+                    : "Absen masuk berhasil dicatat.";
+            }
         } else {
             // Record attendance out and calculate overtime if applicable
             $stmt = $pdo->prepare("
@@ -243,6 +329,8 @@ $employees = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Jabatan</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Jam Masuk</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Keterlambatan</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Potongan</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Jam Keluar</th>
                             </tr>
                         </thead>
@@ -258,11 +346,54 @@ $employees = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                                     <?php echo htmlspecialchars($record['position']); ?>
                                 </td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                                    <?php echo htmlspecialchars($record['status']); ?>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm">
+                                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full 
+                                        <?php 
+                                        echo match($record['attendance_status']) {
+                                            'late' => 'bg-yellow-100 text-yellow-800',
+                                            'absent' => 'bg-red-100 text-red-800',
+                                            'leave' => 'bg-blue-100 text-blue-800',
+                                            default => 'bg-green-100 text-green-800'
+                                        };
+                                        ?>">
+                                        <?php 
+                                        echo match($record['attendance_status']) {
+                                            'late' => 'Terlambat',
+                                            'absent' => 'Tidak Hadir',
+                                            'leave' => 'Cuti',
+                                            default => 'Hadir'
+                                        };
+                                        ?>
+                                    </span>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                                     <?php echo date('H:i', strtotime($record['time_in'])); ?>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                    <?php 
+                                    if ($record['late_minutes'] > 0) {
+                                        echo $record['late_minutes'] . ' menit';
+                                    } else {
+                                        echo '-';
+                                    }
+                                    ?>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                                    <?php 
+                                    if ($record['late_penalty'] > 0) {
+                                        echo 'Rp ' . number_format($record['late_penalty'], 0, ',', '.');
+                                    } else if ($record['attendance_status'] == 'absent') {
+                                        if ($record['leave_deducted']) {
+                                            echo 'Potong Cuti';
+                                        } else if ($record['salary_deducted']) {
+                                            echo 'Potong Gaji';
+                                        } else {
+                                            echo '-';
+                                        }
+                                    } else {
+                                        echo '-';
+                                    }
+                                    ?>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                                     <?php echo $record['time_out'] ? date('H:i', strtotime($record['time_out'])) : '-'; ?>

@@ -67,6 +67,21 @@ try {
                     </div>
                 </a>
 
+                <!-- Penalties Management Card -->
+                <a href="manage_penalties.php" class="bg-white overflow-hidden shadow rounded-lg hover:shadow-md transition-shadow duration-300">
+                    <div class="p-6">
+                        <div class="flex items-center">
+                            <div class="flex-shrink-0 bg-red-500 rounded-md p-3">
+                                <i class="fas fa-exclamation-circle text-white text-2xl"></i>
+                            </div>
+                            <div class="ml-4">
+                                <h3 class="text-lg font-medium text-gray-900">Manajemen Keterlambatan</h3>
+                                <p class="text-sm text-gray-500">Atur kebijakan keterlambatan dan potongan</p>
+                            </div>
+                        </div>
+                    </div>
+                </a>
+
                 <!-- Overtime Report Card -->
                 <a href="overtime.php" class="bg-white overflow-hidden shadow rounded-lg hover:shadow-md transition-shadow duration-300">
                     <div class="p-6">
